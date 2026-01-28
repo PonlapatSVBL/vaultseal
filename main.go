@@ -75,6 +75,52 @@ func encryptHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(out)
 }
 
+func encryptWithLocalKeyHandler(w http.ResponseWriter, r *http.Request) {
+	// 1. ระบุชื่อไฟล์กุญแจที่มีอยู่ในโปรเจค
+	keyPath := "KBankH2HPgpUAT.asc"
+
+	// 2. ตรวจสอบอีเมลหรือ ID ของผู้รับ (จากไฟล์ที่ให้มาคือ PENK <demo@example.com> หรือ ID ktradeh2h02@kasikornbank.com)
+	// ในที่นี้แนะนำให้ใช้ Key ID หรือ Email ที่ระบุในไฟล์
+	recipient := "ktradeh2h02@kasikornbank.com"
+
+	// 3. นำเข้ากุญแจจากไฟล์เข้าสู่ระบบก่อน (เพื่อให้ GPG รู้จักคีย์นี้)
+	importCmd := exec.Command("gpg", "--homedir", gpgDir, "--batch", "--import", keyPath)
+	if out, err := importCmd.CombinedOutput(); err != nil {
+		http.Error(w, "Failed to import local key: "+string(out), 500)
+		return
+	}
+
+	// 4. รับไฟล์ที่ต้องการเข้ารหัสจาก User
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "file required", 400)
+		return
+	}
+	defer file.Close()
+
+	// 5. ทำการเข้ารหัส
+	cmd := exec.Command("gpg",
+		"--homedir", gpgDir,
+		"--batch",
+		"--encrypt",
+		"--recipient", recipient,
+		"--trust-model", "always",
+		"--armor", // ใช้ Armor เพื่อให้ได้ไฟล์แบบ Text
+		"--output", "-",
+	)
+
+	cmd.Stdin = file
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		http.Error(w, "Encryption Error: "+string(out), 500)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="encrypted_by_penk.asc"`)
+	w.Write(out)
+}
+
 /*
 	 func decryptHandler(w http.ResponseWriter, r *http.Request) {
 		file, _, _ := r.FormFile("file")
@@ -130,9 +176,46 @@ func decryptHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(stdout.Bytes())
 }
 
+func decryptLocalHandler(w http.ResponseWriter, r *http.Request) {
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "file required", 400)
+		return
+	}
+	defer file.Close()
+
+	// แยก Stdout เพื่อเอาข้อมูลจริง และ Stderr เพื่อเอาไว้ดู Error Log
+	var stdout, stderr bytes.Buffer
+
+	// คำสั่ง gpg สำหรับถอดรหัส
+	// หมายเหตุ: หากกุญแจ PENK ของคุณมีรหัสผ่าน (Passphrase) ต้องเพิ่ม --passphrase หรือใช้ --pinentry-mode loopback
+	cmd := exec.Command("gpg",
+		"--homedir", gpgDir,
+		"--batch",
+		"--pinentry-mode", "loopback", // ยอมรับรหัสผ่านจาก stdin หรือไม่ต้องใช้หน้าจอโต้ตอบ
+		"--decrypt",
+	)
+
+	cmd.Stdin = file
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		// หากถอดรหัสไม่ได้ (เช่น ไม่มี Private Key ของกุญแจชุดนั้นอยู่ในเครื่อง)
+		http.Error(w, "Decrypt Local Error: "+stderr.String(), 500)
+		return
+	}
+
+	// ส่งไฟล์ที่ถอดรหัสแล้วกลับไป (นามสกุลเดิมก่อนโดน encrypt)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Write(stdout.Bytes())
+}
+
 func main() {
 	http.HandleFunc("/keys/generate", generateKeyHandler)
 	http.HandleFunc("/encrypt", encryptHandler)
+	http.HandleFunc("/encrypt/local", encryptWithLocalKeyHandler)
 	http.HandleFunc("/decrypt", decryptHandler)
+	http.HandleFunc("/decrypt/local", decryptLocalHandler)
 	http.ListenAndServe(":8080", nil)
 }
